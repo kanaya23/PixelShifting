@@ -32,7 +32,7 @@ class OptimizerEngine:
         w_sinkhorn:      Weight for Sinkhorn/SWD loss.
         w_perceptual:    Weight for perceptual loss.
         w_tv:            Weight for total variation loss.
-        sampling_mode:   'bilinear' or 'nearest'.
+        sampling_mode:   'physical', 'bilinear', or 'nearest'.
         max_displacement: Maximum displacement magnitude.
         update_interval: Emit progress every N steps.
         on_progress:     Callback(step, total, warped_tensor, loss_dict).
@@ -49,8 +49,8 @@ class OptimizerEngine:
         w_sinkhorn: float = 1.0,
         w_perceptual: float = 1.0,
         w_tv: float = 0.1,
-        sampling_mode: str = "bilinear",
-        max_displacement: float = 1.0,
+        sampling_mode: str = "physical",
+        max_displacement: float = 0.35,
         update_interval: int = 10,
         dist_mode: str = "swd",
         on_progress: Optional[Callable] = None,
@@ -98,8 +98,8 @@ class OptimizerEngine:
             dist_mode=dist_mode,
         )
 
-        # Optimizer — directly optimizes the displacement tensor
-        self.optimizer = optim.Adam([self.flow_field.displacement], lr=lr)
+        # Optimizer — directly optimizes learnable motion tensors
+        self.optimizer = optim.Adam(self.flow_field.get_trainable_tensors(), lr=lr)
 
         # Learning rate scheduler (cosine annealing)
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(

@@ -143,7 +143,8 @@ class ControlsPanel(QWidget):
 
         grid.addWidget(self._label("Sample"), 0, 2)
         self.sampling_combo = QComboBox()
-        self.sampling_combo.addItems(["bilinear", "nearest"])
+        self.sampling_combo.addItems(["physical", "bilinear", "nearest"])
+        self.sampling_combo.setCurrentText("physical")
         self.sampling_combo.setFixedHeight(22)
         grid.addWidget(self.sampling_combo, 0, 3)
 

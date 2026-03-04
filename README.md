@@ -1,11 +1,11 @@
 # PixelShift — Pixel-Drift Reconstruction
 
-Learn a **displacement field** that rearranges every pixel from a source image to reconstruct a target image. No new pixels are created — only existing ones are shifted.
+Learn a **motion field** that rearranges every pixel from a source image to reconstruct a target image. No new pixels are created — only existing ones are shifted.
 
 ## How It Works
 
-1. **Initialize** an identity flow grid (every pixel maps to itself)
-2. **Warp** the source image using the current flow grid
+1. **Initialize** an identity flow grid with learnable residual motion (and optional rigid translation/rotation)
+2. **Warp** the source image using either backward sampling (`bilinear` / `nearest`) or **physical forward advection** (`physical`)
 3. **Compare** the warped result to the target using three losses:
    - **Multi-Scale Sinkhorn / SWD** — matches global color distributions from coarse-to-fine pyramid levels
    - **Perceptual (VGG19)** — matches structural features
