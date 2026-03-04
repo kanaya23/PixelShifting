@@ -28,7 +28,7 @@ class LossChart(FigureCanvas):
         self.ax = self.fig.add_subplot(111)
         self._style_axes()
 
-        self.loss_history = {"sinkhorn": [], "perceptual": [], "tv": [], "total": []}
+        self.loss_history = {}
         self.step_history = []
 
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -49,19 +49,31 @@ class LossChart(FigureCanvas):
     def update_chart(self, step: int, losses: dict):
         """Add a data point and redraw."""
         self.step_history.append(step)
+        # Dynamically add any new keys from losses
+        for key in losses:
+            if key not in self.loss_history:
+                self.loss_history[key] = [0.0] * (len(self.step_history) - 1)
         for key in self.loss_history:
             self.loss_history[key].append(losses.get(key, 0.0))
 
         self.ax.clear()
         self._style_axes()
 
-        colors = {
+        palette = {
             "total": "#7c3aed",
             "sinkhorn": "#06b6d4",
             "perceptual": "#f59e0b",
             "tv": "#10b981",
+            "convergence": "#3b82f6",
+            "reconstruction": "#ec4899",
         }
-        for key, color in colors.items():
+        fallback = ["#f97316", "#a855f7", "#14b8a6", "#e11d48"]
+        idx = 0
+        for key in self.loss_history:
+            color = palette.get(key)
+            if color is None:
+                color = fallback[idx % len(fallback)]
+                idx += 1
             if self.loss_history[key]:
                 self.ax.plot(
                     self.step_history,
@@ -84,7 +96,7 @@ class LossChart(FigureCanvas):
 
     def reset(self):
         """Clear all history and redraw."""
-        self.loss_history = {"sinkhorn": [], "perceptual": [], "tv": [], "total": []}
+        self.loss_history = {}
         self.step_history = []
         self.ax.clear()
         self._style_axes()
@@ -312,9 +324,8 @@ class ControlsPanel(QWidget):
         self.progress_bar.setFormat(f"Step {step}/{total}  ({pct}%)")
 
         parts = []
-        for key in ("sinkhorn", "perceptual", "tv", "total"):
-            if key in losses:
-                parts.append(f"{key}: {losses[key]:.4f}")
+        for key in sorted(losses.keys()):
+            parts.append(f"{key}: {losses[key]:.4f}")
         self.loss_label.setText("  │  ".join(parts))
 
         self.loss_chart.update_chart(step, losses)
