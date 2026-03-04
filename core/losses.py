@@ -91,6 +91,8 @@ class DistributionLoss(nn.Module):
         max_points:     Subsample to this many pixels for memory efficiency.
         blur:           Sinkhorn blur parameter (Sinkhorn mode).
         min_pyramid_size: Smallest pyramid side length for coarse OT matching.
+        spatial_weight: Weight for normalized (x, y) coordinates concatenated
+                        to RGB points for spatially aware transport.
     """
 
     def __init__(
@@ -100,12 +102,14 @@ class DistributionLoss(nn.Module):
         max_points: int = 4096,
         blur: float = 0.05,
         min_pyramid_size: int = 16,
+        spatial_weight: float = 0.35,
     ):
         super().__init__()
         self.mode = mode
         self.n_projections = n_projections
         self.max_points = max_points
         self.min_pyramid_size = max(1, int(min_pyramid_size))
+        self.spatial_weight = max(0.0, float(spatial_weight))
 
         if mode == "sinkhorn" and HAS_GEOMLOSS:
             self.sinkhorn_fn = SamplesLoss(
@@ -152,13 +156,29 @@ class DistributionLoss(nn.Module):
         self, warped: torch.Tensor, target: torch.Tensor
     ) -> torch.Tensor:
         """Compute OT loss for one scale."""
+        _, _, h, w = warped.shape
+
         # Flatten to (N, 3) point clouds
         w_pixels = warped[0].permute(1, 2, 0).reshape(-1, 3)  # (H*W, 3)
         t_pixels = target[0].permute(1, 2, 0).reshape(-1, 3)
 
+        if self.spatial_weight > 0.0:
+            ys = torch.linspace(-1.0, 1.0, h, device=warped.device)
+            xs = torch.linspace(-1.0, 1.0, w, device=warped.device)
+            grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
+            coords = torch.stack([grid_x, grid_y], dim=-1).reshape(-1, 2)
+            coords = coords * self.spatial_weight
+            w_pixels = torch.cat([w_pixels, coords], dim=1)
+            t_pixels = torch.cat([t_pixels, coords], dim=1)
+
         # Subsample for efficiency
-        w_pixels = self._subsample(w_pixels)
-        t_pixels = self._subsample(t_pixels)
+        if w_pixels.shape[0] == t_pixels.shape[0] and w_pixels.shape[0] > self.max_points:
+            indices = torch.randperm(w_pixels.shape[0], device=warped.device)[: self.max_points]
+            w_pixels = w_pixels[indices]
+            t_pixels = t_pixels[indices]
+        else:
+            w_pixels = self._subsample(w_pixels)
+            t_pixels = self._subsample(t_pixels)
 
         if self.mode == "sinkhorn":
             return self.sinkhorn_fn(w_pixels, t_pixels)

@@ -98,8 +98,19 @@ class OptimizerEngine:
             dist_mode=dist_mode,
         )
 
-        # Optimizer — directly optimizes learnable motion tensors
-        self.optimizer = optim.Adam(self.flow_field.get_trainable_tensors(), lr=lr)
+        # Optimizer — slower LR for rigid params prevents collapse into corners
+        if self.flow_field.use_physical_motion:
+            self.optimizer = optim.Adam(
+                [
+                    {"params": [self.flow_field.displacement], "lr": lr},
+                    {
+                        "params": [self.flow_field.rotation, self.flow_field.translation],
+                        "lr": lr * 0.25,
+                    },
+                ]
+            )
+        else:
+            self.optimizer = optim.Adam([self.flow_field.displacement], lr=lr)
 
         # Learning rate scheduler (cosine annealing)
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(

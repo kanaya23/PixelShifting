@@ -3,7 +3,7 @@ Flow Field — Learnable motion field on top of an identity grid.
 
 Supports:
 1) Backward sampling (`bilinear` / `nearest`) via `torch.grid_sample`
-2) Physical forward advection (`physical`) using mass-preserving splatting
+2) Physical advection (`physical`) via semi-Lagrangian backtracing
    with optional rigid motion (rotation + translation).
 """
 
@@ -16,14 +16,14 @@ class FlowField:
     Manages the identity grid + learnable displacement field.
 
     The flow is:  flow = identity_grid + displacement (+ rigid motion in physical mode)
-    Warping is:   warped = grid_sample(...) or differentiable forward splat
+    Warping is:   warped = grid_sample(...) or semi-Lagrangian advection
 
     Args:
         height:    Image height in pixels.
         width:     Image width in pixels.
         device:    Torch device to allocate tensors on.
         max_disp:  Maximum displacement magnitude (clamped after each step).
-        mode:      'physical' (mass-preserving advection), 'bilinear', or 'nearest'.
+        mode:      'physical' (semi-Lagrangian advection), 'bilinear', or 'nearest'.
     """
 
     def __init__(
@@ -40,6 +40,9 @@ class FlowField:
         self.max_disp = max_disp
         self.mode = mode
         self.use_physical_motion = mode == "physical"
+        self.physical_steps = 6
+        self.max_translation = 0.5
+        self.max_rotation = torch.pi / 2
 
         # Build identity grid: (1, H, W, 2) with values in [-1, 1]
         y = torch.linspace(-1.0, 1.0, height, device=device)
@@ -79,58 +82,46 @@ class FlowField:
         rigid_grid = torch.stack([x_rot, y_rot], dim=-1)
         return rigid_grid + self.translation + self.displacement
 
-    def _forward_splat_warp(self, source: torch.Tensor) -> torch.Tensor:
+    def _inverse_rigid_grid(self, grid: torch.Tensor) -> torch.Tensor:
         """
-        Physically advect source pixels with differentiable bilinear splatting.
-
-        Each source pixel contributes its color mass to neighboring destination
-        pixels based on continuous motion coordinates.
+        Convert destination grid coordinates to source coordinates
+        under the inverse rigid motion.
         """
-        _, channels, h, w = source.shape
-        flow = self._forward_motion_grid()
+        cos_t = torch.cos(self.rotation).view(1, 1, 1)
+        sin_t = torch.sin(self.rotation).view(1, 1, 1)
+        shifted = grid - self.translation
+        x = shifted[..., 0]
+        y = shifted[..., 1]
+        x_inv = cos_t * x + sin_t * y
+        y_inv = -sin_t * x + cos_t * y
+        return torch.stack([x_inv, y_inv], dim=-1)
 
-        x = (flow[..., 0] + 1.0) * 0.5 * (w - 1)
-        y = (flow[..., 1] + 1.0) * 0.5 * (h - 1)
+    def _semi_lagrangian_warp(self, source: torch.Tensor) -> torch.Tensor:
+        """
+        Physically advect pixels using destination-to-source backtracing.
+        """
+        grid = self._inverse_rigid_grid(self.identity_grid)
+        velocity_field = self.displacement.permute(0, 3, 1, 2)
+        dt = 1.0 / float(self.physical_steps)
 
-        x0 = torch.floor(x)
-        y0 = torch.floor(y)
-        x1 = x0 + 1.0
-        y1 = y0 + 1.0
+        for _ in range(self.physical_steps):
+            velocity = F.grid_sample(
+                velocity_field,
+                grid,
+                mode="bilinear",
+                padding_mode="border",
+                align_corners=True,
+            ).permute(0, 2, 3, 1)
+            grid = grid - dt * velocity
 
-        wx1 = x - x0
-        wy1 = y - y0
-        wx0 = 1.0 - wx1
-        wy0 = 1.0 - wy1
-
-        src_flat = source[0].permute(1, 2, 0).reshape(-1, channels)
-        accum = torch.zeros(h * w, channels, device=source.device, dtype=source.dtype)
-        mass = torch.zeros(h * w, 1, device=source.device, dtype=source.dtype)
-
-        def splat(x_idx: torch.Tensor, y_idx: torch.Tensor, weight: torch.Tensor):
-            valid = (
-                (x_idx >= 0.0)
-                & (x_idx <= (w - 1))
-                & (y_idx >= 0.0)
-                & (y_idx <= (h - 1))
-            )
-            x_safe = x_idx.clamp(0.0, float(w - 1)).long()
-            y_safe = y_idx.clamp(0.0, float(h - 1)).long()
-            linear_idx = (y_safe * w + x_safe).reshape(-1)
-            w_flat = (weight * valid.to(weight.dtype)).reshape(-1, 1)
-            accum.scatter_add_(
-                0,
-                linear_idx.unsqueeze(1).expand(-1, channels),
-                src_flat * w_flat,
-            )
-            mass.scatter_add_(0, linear_idx.unsqueeze(1), w_flat)
-
-        splat(x0, y0, wx0 * wy0)
-        splat(x1, y0, wx1 * wy0)
-        splat(x0, y1, wx0 * wy1)
-        splat(x1, y1, wx1 * wy1)
-
-        warped_flat = accum / mass.clamp_min(1e-6)
-        return warped_flat.view(h, w, channels).permute(2, 0, 1).unsqueeze(0)
+        grid = grid.clamp(-1.0, 1.0)
+        return F.grid_sample(
+            source,
+            grid,
+            mode="bilinear",
+            padding_mode="border",
+            align_corners=True,
+        )
 
     def warp(self, source: torch.Tensor) -> torch.Tensor:
         """
@@ -143,7 +134,7 @@ class FlowField:
             (1, C, H, W) warped image tensor.
         """
         if self.use_physical_motion:
-            return self._forward_splat_warp(source)
+            return self._semi_lagrangian_warp(source)
 
         return F.grid_sample(
             source,
@@ -158,8 +149,8 @@ class FlowField:
         with torch.no_grad():
             self.displacement.clamp_(-self.max_disp, self.max_disp)
             if self.use_physical_motion:
-                self.translation.clamp_(-1.0, 1.0)
-                self.rotation.clamp_(-torch.pi, torch.pi)
+                self.translation.clamp_(-self.max_translation, self.max_translation)
+                self.rotation.clamp_(-self.max_rotation, self.max_rotation)
 
     def reset(self):
         """Reset displacement to zero (identity mapping)."""
