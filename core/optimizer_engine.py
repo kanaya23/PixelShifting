@@ -3,7 +3,7 @@ Optimizer Engine — Main optimization loop for pixel-drift reconstruction.
 
 Runs in a background thread, optimizing the displacement field by
 warping the source image and comparing it to the target via combined
-Sinkhorn + Perceptual + TV losses. Emits progress callbacks for GUI.
+Sinkhorn + Perceptual + Reconstruction + TV losses. Emits progress callbacks for GUI.
 """
 
 import time
@@ -50,7 +50,7 @@ class OptimizerEngine:
         w_perceptual: float = 1.0,
         w_tv: float = 0.1,
         sampling_mode: str = "physical",
-        max_displacement: float = 0.35,
+        max_displacement: float = 0.5,
         update_interval: int = 10,
         dist_mode: str = "swd",
         on_progress: Optional[Callable] = None,
@@ -176,7 +176,7 @@ class OptimizerEngine:
                 if self.iterations <= 1:
                     progress = 1.0
                 else:
-                    progress = (step - 1) / (self.iterations - 1)
+                    progress = 0.3 + 0.7 * ((step - 1) / (self.iterations - 1))
                 losses = self.loss_fn(
                     warped=warped,
                     target=self.target,
@@ -188,11 +188,15 @@ class OptimizerEngine:
 
                 # 4. Backprop into displacement
                 losses["total"].backward()
+                torch.nn.utils.clip_grad_norm_(
+                    self.flow_field.get_trainable_tensors(), max_norm=1.0
+                )
                 self.optimizer.step()
                 self.scheduler.step()
 
                 # 5. Clamp displacement
                 self.flow_field.clamp_displacement()
+                self.flow_field.smooth_displacement()
 
                 # 6. Emit progress
                 if self.on_progress and step % self.update_interval == 0:

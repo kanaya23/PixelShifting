@@ -1,7 +1,7 @@
 """
-Loss Functions — Multi-Scale SWD/Sinkhorn, Perceptual (VGG), and Total Variation.
+Loss Functions — Multi-Scale SWD/Sinkhorn, Perceptual (VGG), Reconstruction, and TV.
 
-Three complementary losses that drive the displacement field to rearrange
+Four complementary losses that drive the displacement field to rearrange
 source pixels into the target shape while preserving color distributions
 and ensuring smooth, fluid-like motion.
 
@@ -102,7 +102,7 @@ class DistributionLoss(nn.Module):
         max_points: int = 4096,
         blur: float = 0.05,
         min_pyramid_size: int = 16,
-        spatial_weight: float = 0.35,
+        spatial_weight: float = 0.05,
     ):
         super().__init__()
         self.mode = mode
@@ -287,18 +287,47 @@ def total_variation_loss(displacement: torch.Tensor) -> torch.Tensor:
     return torch.mean(diff_y ** 2) + torch.mean(diff_x ** 2)
 
 
+def multiscale_reconstruction_loss(
+    warped: torch.Tensor,
+    target: torch.Tensor,
+    levels: int = 3,
+) -> torch.Tensor:
+    """
+    Multi-scale L1 reconstruction guidance from fine to coarse.
+    """
+    losses = []
+    for level in range(levels):
+        if level == 0:
+            w_scaled, t_scaled = warped, target
+        else:
+            factor = 2 ** level
+            size = (
+                max(1, warped.shape[2] // factor),
+                max(1, warped.shape[3] // factor),
+            )
+            w_scaled = F.interpolate(
+                warped, size=size, mode="bilinear", align_corners=True
+            )
+            t_scaled = F.interpolate(
+                target, size=size, mode="bilinear", align_corners=True
+            )
+        losses.append(F.l1_loss(w_scaled, t_scaled))
+    return torch.stack(losses).mean()
+
+
 # ---------------------------------------------------------------------------
 # Combined Loss
 # ---------------------------------------------------------------------------
 
 class PixelShiftLoss(nn.Module):
     """
-    Combined loss: Distribution (SWD/Sinkhorn) + Perceptual + Total Variation.
+    Combined loss: Distribution + Perceptual + Reconstruction + TV.
 
     Args:
         device:          Device for computation.
         w_sinkhorn:      Weight for OT / color distribution loss.
         w_perceptual:    Weight for VGG perceptual loss.
+        w_reconstruction: Weight for multi-scale L1 reconstruction loss.
         w_tv:            Weight for total variation on displacement.
         dist_mode:       'swd' (fast) or 'sinkhorn' (slow).
     """
@@ -308,12 +337,14 @@ class PixelShiftLoss(nn.Module):
         device: torch.device = torch.device("cpu"),
         w_sinkhorn: float = 1.0,
         w_perceptual: float = 1.0,
+        w_reconstruction: float = 0.6,
         w_tv: float = 0.1,
         dist_mode: str = "swd",
     ):
         super().__init__()
         self.w_sinkhorn = w_sinkhorn
         self.w_perceptual = w_perceptual
+        self.w_reconstruction = w_reconstruction
         self.w_tv = w_tv
         self.device = device
 
@@ -341,7 +372,7 @@ class PixelShiftLoss(nn.Module):
             tv_weight_scale:  Multiplier applied to w_tv (e.g., annealing 0→1).
 
         Returns:
-            Dict with keys: 'sinkhorn', 'perceptual', 'tv', 'total'.
+            Dict with keys: 'sinkhorn', 'perceptual', 'reconstruction', 'tv', 'total'.
         """
         losses = {}
 
@@ -356,6 +387,10 @@ class PixelShiftLoss(nn.Module):
             loss_perc = torch.tensor(0.0, device=self.device)
         losses["perceptual"] = loss_perc
 
+        # --- Multi-scale reconstruction loss ---
+        loss_recon = multiscale_reconstruction_loss(warped, target, levels=3)
+        losses["reconstruction"] = loss_recon
+
         # --- Total Variation loss ---
         loss_tv = total_variation_loss(displacement)
         losses["tv"] = loss_tv
@@ -366,6 +401,7 @@ class PixelShiftLoss(nn.Module):
         total = (
             self.w_sinkhorn * loss_dist
             + self.w_perceptual * loss_perc
+            + self.w_reconstruction * loss_recon
             + dynamic_w_tv * loss_tv
         )
         losses["total"] = total

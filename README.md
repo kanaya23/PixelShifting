@@ -6,9 +6,10 @@ Learn a **motion field** that rearranges every pixel from a source image to reco
 
 1. **Initialize** an identity flow grid with learnable residual motion (and optional rigid translation/rotation)
 2. **Warp** the source image using either backward sampling (`bilinear` / `nearest`) or **physical semi-Lagrangian advection** (`physical`)
-3. **Compare** the warped result to the target using three losses:
-   - **Multi-Scale Sinkhorn / SWD (spatially aware)** — matches color and position distributions from coarse-to-fine pyramid levels
+3. **Compare** the warped result to the target using four losses:
+   - **Multi-Scale Sinkhorn / SWD** — matches color distributions from coarse-to-fine pyramid levels
    - **Perceptual (VGG19)** — matches structural features
+   - **Multi-Scale Reconstruction (L1)** — keeps global shape aligned to target
    - **Total Variation** — keeps displacement smooth and fluid
 4. **Anneal** optimization over time:
    - Cosine-cool learning rate toward a low final value

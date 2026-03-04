@@ -31,7 +31,7 @@ class FlowField:
         height: int,
         width: int,
         device: torch.device,
-        max_disp: float = 0.35,
+        max_disp: float = 0.5,
         mode: str = "physical",
     ):
         self.height = height
@@ -43,6 +43,7 @@ class FlowField:
         self.physical_steps = 6
         self.max_translation = 0.5
         self.max_rotation = torch.pi / 2
+        self.smoothing_blend = 0.22
 
         # Build identity grid: (1, H, W, 2) with values in [-1, 1]
         y = torch.linspace(-1.0, 1.0, height, device=device)
@@ -151,6 +152,16 @@ class FlowField:
             if self.use_physical_motion:
                 self.translation.clamp_(-self.max_translation, self.max_translation)
                 self.rotation.clamp_(-self.max_rotation, self.max_rotation)
+
+    def smooth_displacement(self):
+        """Diffuse high-frequency velocity noise for coherent particle motion."""
+        if not self.use_physical_motion or self.smoothing_blend <= 0.0:
+            return
+        with torch.no_grad():
+            disp = self.displacement.permute(0, 3, 1, 2)
+            smooth = F.avg_pool2d(disp, kernel_size=5, stride=1, padding=2)
+            disp = (1.0 - self.smoothing_blend) * disp + self.smoothing_blend * smooth
+            self.displacement.copy_(disp.permute(0, 2, 3, 1))
 
     def reset(self):
         """Reset displacement to zero (identity mapping)."""

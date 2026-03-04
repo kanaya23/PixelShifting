@@ -194,7 +194,7 @@ class ControlsPanel(QWidget):
         grid.addWidget(self._label("W·TV"), 2, 4)
         self.w_tv_spin = QDoubleSpinBox()
         self.w_tv_spin.setRange(0.0, 5.0)
-        self.w_tv_spin.setValue(0.1)
+        self.w_tv_spin.setValue(0.3)
         self.w_tv_spin.setSingleStep(0.01)
         self.w_tv_spin.setDecimals(3)
         self.w_tv_spin.setFixedHeight(22)
