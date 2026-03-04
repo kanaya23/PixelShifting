@@ -1,5 +1,5 @@
 """
-Loss Functions — SWD/Sinkhorn, Perceptual (VGG), and Total Variation.
+Loss Functions — Multi-Scale SWD/Sinkhorn, Perceptual (VGG), and Total Variation.
 
 Three complementary losses that drive the displacement field to rearrange
 source pixels into the target shape while preserving color distributions
@@ -90,6 +90,7 @@ class DistributionLoss(nn.Module):
         n_projections:  Number of SWD projections (SWD mode).
         max_points:     Subsample to this many pixels for memory efficiency.
         blur:           Sinkhorn blur parameter (Sinkhorn mode).
+        min_pyramid_size: Smallest pyramid side length for coarse OT matching.
     """
 
     def __init__(
@@ -98,11 +99,13 @@ class DistributionLoss(nn.Module):
         n_projections: int = 64,
         max_points: int = 4096,
         blur: float = 0.05,
+        min_pyramid_size: int = 16,
     ):
         super().__init__()
         self.mode = mode
         self.n_projections = n_projections
         self.max_points = max_points
+        self.min_pyramid_size = max(1, int(min_pyramid_size))
 
         if mode == "sinkhorn" and HAS_GEOMLOSS:
             self.sinkhorn_fn = SamplesLoss(
@@ -123,19 +126,32 @@ class DistributionLoss(nn.Module):
         indices = torch.randperm(n, device=pixels.device)[: self.max_points]
         return pixels[indices]
 
-    def forward(
+    def _pyramid_sizes(self, height: int, width: int) -> list:
+        """Build coarse-to-fine pyramid sizes ending at full resolution."""
+        shortest = min(height, width)
+        if shortest <= self.min_pyramid_size:
+            return [(height, width)]
+
+        sizes = []
+        level = self.min_pyramid_size
+        while level < shortest:
+            scale = level / float(shortest)
+            size = (
+                max(1, int(round(height * scale))),
+                max(1, int(round(width * scale))),
+            )
+            if not sizes or sizes[-1] != size:
+                sizes.append(size)
+            level *= 2
+
+        if not sizes or sizes[-1] != (height, width):
+            sizes.append((height, width))
+        return sizes
+
+    def _single_scale_loss(
         self, warped: torch.Tensor, target: torch.Tensor
     ) -> torch.Tensor:
-        """
-        Compute OT loss between warped and target images.
-
-        Args:
-            warped: (1, 3, H, W) warped source image.
-            target: (1, 3, H, W) target image.
-
-        Returns:
-            Scalar loss value.
-        """
+        """Compute OT loss for one scale."""
         # Flatten to (N, 3) point clouds
         w_pixels = warped[0].permute(1, 2, 0).reshape(-1, 3)  # (H*W, 3)
         t_pixels = target[0].permute(1, 2, 0).reshape(-1, 3)
@@ -150,6 +166,35 @@ class DistributionLoss(nn.Module):
             return sliced_wasserstein_distance(
                 w_pixels, t_pixels, self.n_projections
             )
+
+    def forward(
+        self, warped: torch.Tensor, target: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Compute OT loss between warped and target images.
+
+        Args:
+            warped: (1, 3, H, W) warped source image.
+            target: (1, 3, H, W) target image.
+
+        Returns:
+            Scalar multi-scale OT loss (sum across pyramid levels).
+        """
+        _, _, h, w = warped.shape
+        losses = []
+        for size_h, size_w in self._pyramid_sizes(h, w):
+            if size_h == h and size_w == w:
+                warped_scaled, target_scaled = warped, target
+            else:
+                warped_scaled = F.interpolate(
+                    warped, size=(size_h, size_w), mode="bilinear", align_corners=True
+                )
+                target_scaled = F.interpolate(
+                    target, size=(size_h, size_w), mode="bilinear", align_corners=True
+                )
+            losses.append(self._single_scale_loss(warped_scaled, target_scaled))
+
+        return torch.stack(losses).sum()
 
 
 # ---------------------------------------------------------------------------

@@ -7,7 +7,7 @@ Learn a **displacement field** that rearranges every pixel from a source image t
 1. **Initialize** an identity flow grid (every pixel maps to itself)
 2. **Warp** the source image using the current flow grid
 3. **Compare** the warped result to the target using three losses:
-   - **Sinkhorn / SWD** — matches global color distributions
+   - **Multi-Scale Sinkhorn / SWD** — matches global color distributions from coarse-to-fine pyramid levels
    - **Perceptual (VGG19)** — matches structural features
    - **Total Variation** — keeps displacement smooth and fluid
 4. **Backpropagate** error directly into the flow grid values
