@@ -1,16 +1,19 @@
 """
-Loss Functions — Sinkhorn/SWD, Perceptual (VGG), and Total Variation.
+Loss Functions — SWD/Sinkhorn, Perceptual (VGG), and Total Variation.
 
 Three complementary losses that drive the displacement field to rearrange
 source pixels into the target shape while preserving color distributions
 and ensuring smooth, fluid-like motion.
+
+Default: Sliced Wasserstein Distance (fast, O(N log N)).
+Optional: Sinkhorn via geomloss (accurate but slow, O(N²)).
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Try to import geomloss for GPU-accelerated Sinkhorn
+# Try to import geomloss for Sinkhorn (optional)
 try:
     from geomloss import SamplesLoss
 
@@ -20,19 +23,19 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# Sliced Wasserstein Distance (lightweight OT fallback)
+# Sliced Wasserstein Distance (fast default)
 # ---------------------------------------------------------------------------
 
 def sliced_wasserstein_distance(
     x: torch.Tensor,
     y: torch.Tensor,
-    n_projections: int = 128,
+    n_projections: int = 64,
 ) -> torch.Tensor:
     """
     Sliced Wasserstein Distance between two point clouds.
 
     Projects onto random 1D directions, sorts, and computes L2.
-    O(N log N) per projection — much cheaper than full Sinkhorn.
+    O(N log N) per projection — orders of magnitude faster than Sinkhorn.
 
     Args:
         x: (N, D) source point cloud (flattened pixel colors).
@@ -72,42 +75,45 @@ def sliced_wasserstein_distance(
 
 
 # ---------------------------------------------------------------------------
-# Sinkhorn Loss (uses geomloss if available, else SWD)
+# Distribution Loss (SWD default, Sinkhorn optional)
 # ---------------------------------------------------------------------------
 
-class SinkhornLoss(nn.Module):
+class DistributionLoss(nn.Module):
     """
     Optimal transport loss for color distribution matching.
 
-    Uses geomloss.SamplesLoss (entropy-regularized Sinkhorn) when available,
-    falls back to Sliced Wasserstein Distance otherwise.
+    Uses Sliced Wasserstein Distance by default (fast).
+    Can optionally use geomloss Sinkhorn (slow but more accurate).
 
     Args:
-        blur:           Sinkhorn blur/epsilon parameter.
-        n_projections:  Number of SWD projections (fallback mode).
+        mode:           'swd' (default, fast) or 'sinkhorn' (slow, accurate).
+        n_projections:  Number of SWD projections (SWD mode).
         max_points:     Subsample to this many pixels for memory efficiency.
+        blur:           Sinkhorn blur parameter (Sinkhorn mode).
     """
 
     def __init__(
         self,
+        mode: str = "swd",
+        n_projections: int = 64,
+        max_points: int = 4096,
         blur: float = 0.05,
-        n_projections: int = 128,
-        max_points: int = 16384,
     ):
         super().__init__()
-        self.blur = blur
+        self.mode = mode
         self.n_projections = n_projections
         self.max_points = max_points
-        self.use_geomloss = HAS_GEOMLOSS
 
-        if self.use_geomloss:
-            self.loss_fn = SamplesLoss(
+        if mode == "sinkhorn" and HAS_GEOMLOSS:
+            self.sinkhorn_fn = SamplesLoss(
                 loss="sinkhorn",
                 p=2,
                 blur=blur,
-                scaling=0.9,
-                backend="tensorized",
+                scaling=0.5,
+                backend="online",
             )
+        else:
+            self.mode = "swd"  # Fallback if geomloss not available
 
     def _subsample(self, pixels: torch.Tensor) -> torch.Tensor:
         """Randomly subsample pixels if exceeding max_points."""
@@ -134,12 +140,12 @@ class SinkhornLoss(nn.Module):
         w_pixels = warped[0].permute(1, 2, 0).reshape(-1, 3)  # (H*W, 3)
         t_pixels = target[0].permute(1, 2, 0).reshape(-1, 3)
 
-        # Subsample for memory efficiency
+        # Subsample for efficiency
         w_pixels = self._subsample(w_pixels)
         t_pixels = self._subsample(t_pixels)
 
-        if self.use_geomloss:
-            return self.loss_fn(w_pixels, t_pixels)
+        if self.mode == "sinkhorn":
+            return self.sinkhorn_fn(w_pixels, t_pixels)
         else:
             return sliced_wasserstein_distance(
                 w_pixels, t_pixels, self.n_projections
@@ -211,7 +217,6 @@ def total_variation_loss(displacement: torch.Tensor) -> torch.Tensor:
     Returns:
         Scalar TV loss.
     """
-    # Spatial gradients in y and x directions
     diff_y = displacement[:, 1:, :, :] - displacement[:, :-1, :, :]
     diff_x = displacement[:, :, 1:, :] - displacement[:, :, :-1, :]
     return torch.mean(diff_y ** 2) + torch.mean(diff_x ** 2)
@@ -223,15 +228,14 @@ def total_variation_loss(displacement: torch.Tensor) -> torch.Tensor:
 
 class PixelShiftLoss(nn.Module):
     """
-    Combined loss: Sinkhorn + Perceptual + Total Variation.
+    Combined loss: Distribution (SWD/Sinkhorn) + Perceptual + Total Variation.
 
     Args:
         device:          Device for computation.
         w_sinkhorn:      Weight for OT / color distribution loss.
         w_perceptual:    Weight for VGG perceptual loss.
         w_tv:            Weight for total variation on displacement.
-        sinkhorn_blur:   Blur parameter for Sinkhorn.
-        sinkhorn_points: Max subsample points for Sinkhorn.
+        dist_mode:       'swd' (fast) or 'sinkhorn' (slow).
     """
 
     def __init__(
@@ -240,8 +244,7 @@ class PixelShiftLoss(nn.Module):
         w_sinkhorn: float = 1.0,
         w_perceptual: float = 1.0,
         w_tv: float = 0.1,
-        sinkhorn_blur: float = 0.05,
-        sinkhorn_points: int = 16384,
+        dist_mode: str = "swd",
     ):
         super().__init__()
         self.w_sinkhorn = w_sinkhorn
@@ -249,9 +252,7 @@ class PixelShiftLoss(nn.Module):
         self.w_tv = w_tv
         self.device = device
 
-        self.sinkhorn_loss = SinkhornLoss(
-            blur=sinkhorn_blur, max_points=sinkhorn_points
-        )
+        self.distribution_loss = DistributionLoss(mode=dist_mode, max_points=4096)
         self.perceptual_loss = PerceptualLoss()
 
     def forward(
@@ -277,9 +278,9 @@ class PixelShiftLoss(nn.Module):
         """
         losses = {}
 
-        # --- Sinkhorn / SWD loss ---
-        loss_sink = self.sinkhorn_loss(warped, target)
-        losses["sinkhorn"] = loss_sink
+        # --- Distribution loss (SWD or Sinkhorn) ---
+        loss_dist = self.distribution_loss(warped, target)
+        losses["sinkhorn"] = loss_dist  # keep key name for GUI compat
 
         # --- Perceptual loss ---
         if warped_features is not None and target_features is not None:
@@ -294,7 +295,7 @@ class PixelShiftLoss(nn.Module):
 
         # --- Combined ---
         total = (
-            self.w_sinkhorn * loss_sink
+            self.w_sinkhorn * loss_dist
             + self.w_perceptual * loss_perc
             + self.w_tv * loss_tv
         )

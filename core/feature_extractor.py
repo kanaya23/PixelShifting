@@ -72,7 +72,6 @@ class VGGFeatureExtractor(nn.Module):
             "std", IMAGENET_STD.to(device)
         )
 
-    @torch.no_grad()
     def forward(self, x: torch.Tensor) -> dict:
         """
         Extract features from the input image.

@@ -67,6 +67,7 @@ class OptimizationWorker(QThread):
                 w_perceptual=self.params.get("w_perceptual", 1.0),
                 w_tv=self.params.get("w_tv", 0.1),
                 sampling_mode=self.params.get("sampling_mode", "bilinear"),
+                dist_mode=self.params.get("dist_mode", "swd"),
                 update_interval=max(1, self.params.get("iterations", 1000) // 100),
                 on_progress=on_progress,
                 on_finished=on_finished,

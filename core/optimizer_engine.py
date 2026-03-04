@@ -52,6 +52,7 @@ class OptimizerEngine:
         sampling_mode: str = "bilinear",
         max_displacement: float = 1.0,
         update_interval: int = 10,
+        dist_mode: str = "swd",
         on_progress: Optional[Callable] = None,
         on_finished: Optional[Callable] = None,
     ):
@@ -80,8 +81,13 @@ class OptimizerEngine:
         # VGG feature extractor (on feature device)
         self.vgg = VGGFeatureExtractor(device=device_manager.feature_device)
 
-        # Pre-compute target features (once, read-only)
-        self.target_features = self.vgg(self.target.to(device_manager.feature_device))
+        # Pre-compute target features (once, read-only — no grad needed)
+        with torch.no_grad():
+            target_features_raw = self.vgg(self.target.to(device_manager.feature_device))
+        # Cache on optim device to avoid cross-device transfer every step
+        self.target_features = {
+            k: v.detach().to(dev) for k, v in target_features_raw.items()
+        }
 
         # Loss function
         self.loss_fn = PixelShiftLoss(
@@ -89,6 +95,7 @@ class OptimizerEngine:
             w_sinkhorn=w_sinkhorn,
             w_perceptual=w_perceptual,
             w_tv=w_tv,
+            dist_mode=dist_mode,
         )
 
         # Optimizer — directly optimizes the displacement tensor
@@ -148,24 +155,19 @@ class OptimizerEngine:
                 # 1. Warp the source image
                 warped = self.flow_field.warp(self.source)
 
-                # 2. Extract features from warped image
-                warped_features = self.vgg(warped.to(feat_dev))
-
-                # Move warped features to optimizer device for loss
+                # 2. Extract features from warped image (with gradients)
+                warped_features_raw = self.vgg(warped.to(feat_dev))
                 warped_features_dev = {
-                    k: v.to(dev) for k, v in warped_features.items()
-                }
-                target_features_dev = {
-                    k: v.to(dev) for k, v in self.target_features.items()
+                    k: v.to(dev) for k, v in warped_features_raw.items()
                 }
 
-                # 3. Compute losses
+                # 3. Compute losses (target features already cached on dev)
                 losses = self.loss_fn(
                     warped=warped,
                     target=self.target,
                     displacement=self.flow_field.displacement,
                     warped_features=warped_features_dev,
-                    target_features=target_features_dev,
+                    target_features=self.target_features,
                 )
 
                 # 4. Backprop into displacement
