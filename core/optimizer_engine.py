@@ -103,7 +103,7 @@ class OptimizerEngine:
 
         # Learning rate scheduler (cosine annealing)
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=iterations, eta_min=lr * 0.01
+            self.optimizer, T_max=iterations, eta_min=min(lr * 0.01, 1e-4)
         )
 
         # Control flags
@@ -162,12 +162,17 @@ class OptimizerEngine:
                 }
 
                 # 3. Compute losses (target features already cached on dev)
+                if self.iterations <= 1:
+                    progress = 1.0
+                else:
+                    progress = (step - 1) / (self.iterations - 1)
                 losses = self.loss_fn(
                     warped=warped,
                     target=self.target,
                     displacement=self.flow_field.displacement,
                     warped_features=warped_features_dev,
                     target_features=self.target_features,
+                    tv_weight_scale=progress,
                 )
 
                 # 4. Backprop into displacement

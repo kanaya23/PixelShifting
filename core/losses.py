@@ -307,6 +307,7 @@ class PixelShiftLoss(nn.Module):
         displacement: torch.Tensor,
         warped_features: dict = None,
         target_features: dict = None,
+        tv_weight_scale: float = 1.0,
     ) -> dict:
         """
         Compute all loss components and return as a dictionary.
@@ -317,6 +318,7 @@ class PixelShiftLoss(nn.Module):
             displacement:     (1, H, W, 2) displacement field.
             warped_features:  VGG features of warped image (optional).
             target_features:  VGG features of target image (optional).
+            tv_weight_scale:  Multiplier applied to w_tv (e.g., annealing 0→1).
 
         Returns:
             Dict with keys: 'sinkhorn', 'perceptual', 'tv', 'total'.
@@ -339,10 +341,12 @@ class PixelShiftLoss(nn.Module):
         losses["tv"] = loss_tv
 
         # --- Combined ---
+        tv_weight_scale = max(0.0, min(1.0, float(tv_weight_scale)))
+        dynamic_w_tv = self.w_tv * tv_weight_scale
         total = (
             self.w_sinkhorn * loss_dist
             + self.w_perceptual * loss_perc
-            + self.w_tv * loss_tv
+            + dynamic_w_tv * loss_tv
         )
         losses["total"] = total
 

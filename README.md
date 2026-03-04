@@ -10,8 +10,11 @@ Learn a **displacement field** that rearranges every pixel from a source image t
    - **Multi-Scale Sinkhorn / SWD** — matches global color distributions from coarse-to-fine pyramid levels
    - **Perceptual (VGG19)** — matches structural features
    - **Total Variation** — keeps displacement smooth and fluid
-4. **Backpropagate** error directly into the flow grid values
-5. **Repeat** — pixels gradually drift into the target shape
+4. **Anneal** optimization over time:
+   - Cosine-cool learning rate toward a low final value
+   - Linearly ramp TV weight from 0 to the configured **W·TV**
+5. **Backpropagate** error directly into the flow grid values
+6. **Repeat** — pixels gradually drift into the target shape
 
 ## Quick Start
 
